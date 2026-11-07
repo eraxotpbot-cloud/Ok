@@ -47,9 +47,9 @@ def keep_alive():
     print("Flask Keep-Alive started.")
 
 # --- Configuration ---
-TOKEN = '9189503193:AAH2XolyTdBXUOuY2nbDdsfoGJpzXEqLtno' # apna code daalo
-OWNER_ID = 7739225825 #change it
-ADMIN_ID = 8000000000  #change it
+TOKEN = '9189503193:AAH2XolyTdBXUOuY2nbDdsfoGJpzXEqLtno'
+OWNER_ID = 7998643430
+ADMIN_ID = 7998643430
 YOUR_USERNAME = '@R1898114'
 UPDATE_CHANNEL = '@demo' #AJ_Papa
 FORCE_JOIN_CHANNELS = [
@@ -273,6 +273,14 @@ def get_approval_kb(aid):
         [rbtn(f"✅ Approve {aid}", "6111726981760423576", "success"),
          rbtn(f"❌ Reject {aid}", "6311965254817423602", "danger")]
     ]
+
+def get_approval_inline_kb(aid):
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("✅ Approve", callback_data=f"approval:approve:{aid}"),
+        types.InlineKeyboardButton("❌ Reject", callback_data=f"approval:reject:{aid}")
+    )
+    return markup
 
 # --- DB ---
 def init_db():
@@ -725,7 +733,7 @@ def notify_admin_new_file(aid, uid, uname, fname, fn, ft, is_zip=False):
     )
     for admin in set([int(ADMIN_ID)] + list(admin_ids)):
         try:
-            raw_send(admin, txt)
+            bot.send_message(admin, txt, parse_mode='HTML', reply_markup=get_approval_inline_kb(aid))
         except Exception as e:
             logger.error(f"notify admin {admin}: {e}")
 
@@ -932,55 +940,73 @@ def cmd_admin(m):
     else:
         bot.reply_to(m, f"{PEM['no']} Not admin.", parse_mode='HTML')
 
-# --- Approve / Reject via text command ---
+# --- Approve / Reject ---
+def process_approval_action(action, aid, admin_message):
+    if aid not in pending_approvals:
+        bot.reply_to(admin_message, f"{PEM['no']} Approval ID not found or already handled.", parse_mode='HTML')
+        return False
+    ap = pending_approvals.pop(aid)
+    file_uid = ap['user_id']; fn = ap['file_name']; ft = ap['file_type']
+    fp = ap['file_path']; folder = ap['user_folder']; om = ap.get('message_info')
+    try:
+        if action == "approve":
+            target = om if om else admin_message
+            if ft == 'py':
+                threading.Thread(target=run_script, args=(fp, file_uid, folder, fn, target)).start()
+            elif ft == 'js':
+                threading.Thread(target=run_js_script, args=(fp, file_uid, folder, fn, target)).start()
+            notify_user_approved(file_uid, fn, ft)
+            bot.reply_to(admin_message,
+                f"{PEM['ok']} <b>Approved & Started!</b>\n\n"
+                f"{PEM['user']} User: <code>{file_uid}</code>\n"
+                f"{PEM['file']} File: <code>{fn}</code>", parse_mode='HTML')
+        elif action == "reject":
+            if os.path.exists(fp): os.remove(fp)
+            remove_user_file_db(file_uid, fn)
+            notify_user_rejected(file_uid, fn, reason="Admin rejected the file.")
+            bot.reply_to(admin_message,
+                f"{PEM['no']} <b>Rejected & Deleted!</b>\n\n"
+                f"{PEM['user']} User: <code>{file_uid}</code>\n"
+                f"{PEM['file']} File: <code>{fn}</code>", parse_mode='HTML')
+        else:
+            pending_approvals[aid] = ap
+            return False
+        return True
+    except Exception as e:
+        pending_approvals[aid] = ap
+        logger.error(f"approval {action} err: {e}", exc_info=True)
+        bot.reply_to(admin_message, f"{PEM['no']} Error: {e}", parse_mode='HTML')
+        return False
+
+@bot.callback_query_handler(func=lambda c: c.data and c.data.startswith('approval:'))
+def handle_approval_callback(c):
+    if c.from_user.id not in admin_ids:
+        bot.answer_callback_query(c.id, "Admin only.", show_alert=True)
+        return
+    try:
+        _, action, aid = c.data.split(':', 2)
+    except ValueError:
+        bot.answer_callback_query(c.id, "Invalid approval action.", show_alert=True)
+        return
+    if process_approval_action(action, aid.upper(), c.message):
+        bot.answer_callback_query(c.id, "Approved." if action == 'approve' else "Rejected.")
+        try:
+            bot.edit_message_reply_markup(c.message.chat.id, c.message.message_id, reply_markup=None)
+        except Exception:
+            pass
+    else:
+        bot.answer_callback_query(c.id, "Already handled or failed.", show_alert=True)
+
 @bot.message_handler(func=lambda m: m.text and (m.text.lower().startswith("approve ") or m.text.lower().startswith("reject ")))
 def handle_approval_text(m):
-    uid = m.from_user.id
-    if uid not in admin_ids:
+    if m.from_user.id not in admin_ids:
         bot.reply_to(m, f"{PEM['no']} Admin only.", parse_mode='HTML')
         return
     parts = m.text.strip().split()
     if len(parts) != 2:
         bot.reply_to(m, f"{PEM['warn']} Use: <code>approve ABCD1234</code> or <code>reject ABCD1234</code>", parse_mode='HTML')
         return
-    action = parts[0].lower()
-    aid = parts[1].upper()
-    if aid not in pending_approvals:
-        bot.reply_to(m, f"{PEM['no']} Approval ID not found or already handled.", parse_mode='HTML')
-        return
-    ap = pending_approvals[aid]
-    file_uid = ap['user_id']; fn = ap['file_name']; ft = ap['file_type']
-    fp = ap['file_path']; folder = ap['user_folder']; om = ap.get('message_info')
-
-    if action == "approve":
-        del pending_approvals[aid]
-        try:
-            target = om if om else m
-            if ft == 'py':
-                threading.Thread(target=run_script, args=(fp, file_uid, folder, fn, target)).start()
-            elif ft == 'js':
-                threading.Thread(target=run_js_script, args=(fp, file_uid, folder, fn, target)).start()
-            notify_user_approved(file_uid, fn, ft)
-            bot.reply_to(m,
-                f"{PEM['ok']} <b>Approved & Started!</b>\n\n"
-                f"{PEM['user']} User: <code>{file_uid}</code>\n"
-                f"{PEM['file']} File: <code>{fn}</code>",
-                parse_mode='HTML')
-        except Exception as e:
-            logger.error(f"approve err: {e}", exc_info=True)
-            bot.reply_to(m, f"{PEM['no']} Error: {e}", parse_mode='HTML')
-    elif action == "reject":
-        del pending_approvals[aid]
-        try:
-            if os.path.exists(fp): os.remove(fp)
-            remove_user_file_db(file_uid, fn)
-        except Exception as e: logger.error(f"reject del: {e}")
-        notify_user_rejected(file_uid, fn, reason="Admin rejected the file.")
-        bot.reply_to(m,
-            f"{PEM['no']} <b>Rejected & Deleted!</b>\n\n"
-            f"{PEM['user']} User: <code>{file_uid}</code>\n"
-            f"{PEM['file']} File: <code>{fn}</code>",
-            parse_mode='HTML')
+    process_approval_action(parts[0].lower(), parts[1].upper(), m)
 
 # --- Button Text Handler ---
 @bot.message_handler(func=lambda m: m.text in [
@@ -1068,13 +1094,17 @@ def handle_btn(m):
                  f"{PEM['crown']} <b>Admin Panel</b>\n\n"
                  f"Send: <code>addadmin ID</code>\n"
                  f"Send: <code>removeadmin ID</code>\n"
-                 f"Send: <code>listadmins</code>",
+                 f"Send: <code>listadmins</code>\n"
+                 f"Owner controls: <code>ownerdelete USER_ID filename</code>\n"
+                 f"Owner controls: <code>ownerstop USER_ID filename</code>\n"
+                 f"Use <b>🔒 Lock Bot</b> to pause all normal-user activity.",
                  reply_keyboard=get_main_kb(uid))
 
 # --- File Control via Text Commands ---
 @bot.message_handler(func=lambda m: m.text and (
     m.text.startswith("Start ") or m.text.startswith("Stop ") or
     m.text.startswith("Delete ") or m.text.startswith("Logs ")
+    or m.text.lower().startswith("ownerdelete ") or m.text.lower().startswith("ownerstop ")
 ))
 def handle_file_cmd(m):
     global bot_locked
@@ -1083,6 +1113,34 @@ def handle_file_cmd(m):
     if len(parts) != 2: return
     action = parts[0].lower()
     fn = parts[1].strip()
+
+    if action in ('ownerdelete', 'ownerstop'):
+        if uid != OWNER_ID:
+            raw_send(m.chat.id, f"{PEM['no']} Owner only.", reply_keyboard=get_main_kb(uid)); return
+        target_parts = fn.split(maxsplit=1)
+        if len(target_parts) != 2 or not target_parts[0].isdigit():
+            raw_send(m.chat.id, f"{PEM['warn']} Use: <code>{action} USER_ID filename</code>", reply_keyboard=get_main_kb(uid)); return
+        owner = int(target_parts[0]); fn = target_parts[1].strip()
+        folder = get_user_folder(owner); fp = os.path.join(folder, fn)
+        key = f"{owner}_{fn}"
+        if action == 'ownerstop':
+            pi = bot_scripts.get(key)
+            if pi and is_bot_running(owner, fn):
+                kill_process_tree(pi); bot_scripts.pop(key, None)
+                raw_send(m.chat.id, f"{PEM['ok']} Stopped <code>{fn}</code> for <code>{owner}</code>.", reply_keyboard=get_main_kb(uid))
+            else:
+                raw_send(m.chat.id, f"{PEM['warn']} That user's file is not running.", reply_keyboard=get_main_kb(uid))
+            return
+        if is_bot_running(owner, fn):
+            pi = bot_scripts.get(key)
+            if pi: kill_process_tree(pi)
+            bot_scripts.pop(key, None)
+        if os.path.exists(fp): os.remove(fp)
+        lp = os.path.join(folder, f"{os.path.splitext(fn)[0]}.log")
+        if os.path.exists(lp): os.remove(lp)
+        remove_user_file_db(owner, fn)
+        raw_send(m.chat.id, f"{PEM['ok']} Deleted <code>{fn}</code> for <code>{owner}</code>.", reply_keyboard=get_main_kb(uid))
+        return
 
     # Check ownership
     owner = None
