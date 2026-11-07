@@ -47,7 +47,7 @@ def keep_alive():
     print("Flask Keep-Alive started.")
 
 # --- Configuration ---
-TOKEN = '9028855934:AAHqUJ2tNV3wrRvAH9WnetXPaCVYbfNVtkw' # apna code daalo
+TOKEN = '9189503193:AAH2XolyTdBXUOuY2nbDdsfoGJpzXEqLtno' # apna code daalo
 OWNER_ID = 7739225825 #change it
 ADMIN_ID = 8000000000  #change it
 YOUR_USERNAME = '@R1898114'
